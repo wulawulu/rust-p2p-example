@@ -1,9 +1,7 @@
 use std::collections::HashSet;
-use std::num::ParseIntError;
 use libp2p::{identity, mplex, NetworkBehaviour, PeerId, Swarm, Transport};
 use libp2p::core::upgrade;
 use libp2p::floodsub::{Floodsub, FloodsubEvent, Topic};
-use libp2p::futures::future::ok;
 use libp2p::futures::StreamExt;
 use libp2p::mdns::{Mdns, MdnsEvent};
 use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
