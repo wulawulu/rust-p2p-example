@@ -2,12 +2,12 @@ use std::collections::HashSet;
 use std::num::ParseIntError;
 use libp2p::{identity, mplex, NetworkBehaviour, PeerId, Swarm, Transport};
 use libp2p::core::upgrade;
-use libp2p::floodsub::{Floodsub, Topic};
+use libp2p::floodsub::{Floodsub, FloodsubEvent, Topic};
 use libp2p::futures::future::ok;
 use libp2p::futures::StreamExt;
-use libp2p::mdns::Mdns;
+use libp2p::mdns::{Mdns, MdnsEvent};
 use libp2p::noise::{Keypair, NoiseConfig, X25519Spec};
-use libp2p::swarm::SwarmBuilder;
+use libp2p::swarm::{NetworkBehaviourEventProcess, SwarmBuilder};
 use libp2p::tcp::TokioTcpConfig;
 use log::{error, info};
 use once_cell::sync::Lazy;
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedSender;
 
 const STORAGE_FILE_PATH: &str = "./recipes.json";
 
@@ -63,7 +64,79 @@ struct RecipeBehaviour {
     floodsub: Floodsub,
     mdns: Mdns,
     #[behaviour(ignore)]
-    response_sender: mpsc::UnboundedSender<ListResponse>,
+    response_sender: UnboundedSender<ListResponse>,
+}
+
+impl NetworkBehaviourEventProcess<MdnsEvent> for RecipeBehaviour {
+    fn inject_event(&mut self, event: MdnsEvent) {
+        match event {
+            MdnsEvent::Discovered(discovered_list) => {
+                for (peer, _addr) in discovered_list {
+                    self.floodsub.add_node_to_partial_view(peer);
+                }
+            }
+            MdnsEvent::Expired(expired_list) => {
+                for (peer,_addr) in expired_list {
+                    if !self.mdns.has_node(&peer){
+                        self.floodsub.remove_node_from_partial_view(&peer);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl NetworkBehaviourEventProcess<FloodsubEvent> for RecipeBehaviour{
+    fn inject_event(&mut self, event: FloodsubEvent) {
+        match event {
+            FloodsubEvent::Message(msg) => {
+                if let Ok(resp) = serde_json::from_slice::<ListResponse>(&msg.data) {
+                    if resp.receiver == PEER_ID.to_string() {
+                        resp.data.iter().for_each(|r| info!("{:?}",r));
+                    }
+                } else if let Ok(req) = serde_json::from_slice::<ListRequest>(&msg.data){
+                    match req.mode {
+                        ListMode::ALL => {
+                            info!("Received All req: {:?} from {:?}",req,msg.source);
+                            respond_with_public_recipes(
+                                self.response_sender.clone(),
+                                msg.source.to_string(),
+                            );
+                        }
+                        ListMode::One(ref peer_id) => {
+                            if peer_id==&PEER_ID.to_string() {
+                                info!("Received req: {:?} from {:?}", req, msg.source);
+                                respond_with_public_recipes(
+                                    self.response_sender.clone(),
+                                    msg.source.to_string(),
+                                );
+                            }
+                        }
+                    }
+                }
+
+            }
+            _ => {}
+        }
+    }
+}
+
+fn respond_with_public_recipes(sender: UnboundedSender<ListResponse>, receiver: String) {
+    tokio::spawn(async move{
+        match read_local_recipes().await {
+            Ok(recipes) => {
+                let resp = ListResponse {
+                    mode: ListMode::ALL,
+                    receiver,
+                    data: recipes.into_iter().filter(|r| r.public).collect(),
+                };
+                if let Err(e) = sender.send(resp){
+                    error!("error sending response via channel, {}", e);
+                }
+            }
+            Err(e) => error!("error fetching local recipes to answer ALL request, {}", e),
+        }
+    });
 }
 
 #[tokio::main]
@@ -122,7 +195,8 @@ async fn main() {
         if let Some(event) = evt {
             match event {
                 EventType::Response(resp) => {
-                    //todo
+                    let json = serde_json::to_string(&resp).expect("can jsonify response");
+                    swarm.behaviour_mut().floodsub.publish(TOPIC.clone(), json.as_bytes());
                 }
                 EventType::Input(line) => match line.as_str() {
                     "ls p" => handle_list_peers(&mut swarm).await,
