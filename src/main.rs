@@ -138,7 +138,36 @@ async fn main() {
 }
 
 async fn handle_list_recipes(cmd: &str, swarm: &mut Swarm<RecipeBehaviour>) {
-    todo!()
+    let rest = cmd.strip_prefix("ls r ");
+    match rest {
+        Some("all") => {
+            let req = ListRequest {
+                mode: ListMode::ALL,
+            };
+            let json = serde_json::to_string(&req).expect("can jsonify request");
+            swarm
+                .behaviour_mut()
+                .floodsub.publish(TOPIC.clone(), json.as_bytes());
+        }
+        Some(recipes_peer_id) => {
+            let req = ListRequest {
+                mode: ListMode::One(recipes_peer_id.to_owned())
+            };
+            let json = serde_json::to_string(&req).expect("can jsonify request ");
+            swarm
+                .behaviour_mut()
+                .floodsub.publish(TOPIC.clone(), json.as_bytes());
+        }
+        None => {
+            match read_local_recipes().await {
+                Ok(v) => {
+                    info!("Local Recipes ({})",v.len());
+                    v.iter().for_each(|r| info!("{:?}",r));
+                }
+                Err(e) => error!("error fetching local recipes: {}", e),
+            }
+        }
+    }
 }
 
 async fn handle_list_peers(swarm: &mut Swarm<RecipeBehaviour>) {
